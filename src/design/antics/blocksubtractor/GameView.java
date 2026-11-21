@@ -19,20 +19,22 @@ public class GameView extends View {
 
     private static final int COLS = 8, ROWS = 6;
     private static final float STEP = 1f / 120f;
-    private static final int[] ROW_COLORS = {
-        0xFFE53935, 0xFFFB8C00, 0xFFFDD835, 0xFF43A047, 0xFF1E88E5, 0xFF8E24AA };
 
     private enum State { READY, PLAYING, PAUSED, MATH }
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
+    private final Theme.Pops pops = new Theme.Pops();
+    private boolean menuGesture;
+    private final Theme.ThreeTap threeTap = new Theme.ThreeTap();
+    private final Theme.Trail trail = new Theme.Trail();
     private final SharedPreferences prefs;
 
     private State state = State.READY;
     private float w, h, unit;                    // unit = 1% of width
     private float padX, padW, padH, padY;
     private float ballX, ballY, ballVX, ballVY, ballR;
-    private final boolean[][] alive = new boolean[ROWS][COLS];
+    private final int[][] hp = new int[ROWS][COLS];   // hits left; 0 = gone
     private int bricksLeft, score, best, drops, level = 1;
     private final Random rng = new Random();
     private int answer, needed, solved;
@@ -50,9 +52,11 @@ public class GameView extends View {
 
     public GameView(Context c) {
         super(c);
+        Theme.init(paint);
         prefs = c.getSharedPreferences("game", Context.MODE_PRIVATE);
         best = prefs.getInt("best", 0);
         packs = prefs.getInt("packs2", Packs.DEFAULT_MASK);
+        growth = new int[] {prefs.getInt("gmin", 1), prefs.getInt("gafter", 3), prefs.getInt("grate", 1), prefs.getInt("gmax", 20)};
         setKeepScreenOn(true);
     }
 
@@ -65,7 +69,7 @@ public class GameView extends View {
         brickW = (w - brickGap * (COLS + 1)) / COLS;
         brickH = 3.6f * unit;
         brickTop = 16 * unit;
-        menuBtn.set(0, 0, 14 * unit, 12 * unit);
+        menuBtn.set(0, 0, Theme.MENU_W * unit, Theme.MENU_H * unit);
         float kw = 22 * unit, kh = 12 * unit, gap = 2 * unit;
         float left = (w - 3 * kw - 2 * gap) / 2, top = h - 4 * kh - 3 * gap - 6 * unit;
         for (int i = 0; i < 12; i++)
@@ -77,7 +81,8 @@ public class GameView extends View {
     private void newGame() { score = 0; drops = 0; level = 1; startLevel(); }
 
     /** Problems owed after the Nth lost ball: 1,1,1,2,3,4,... */
-    private static int problemsFor(int drop) { return drop <= 3 ? 1 : drop - 2; }
+    private int[] growth = {1, 3, 1, 20};   // min, grow after ball, extra per ball, max
+    private int problemsFor(int drop) { return ParentsMenu.problems(growth, drop); }
 
     private void nextProblem() {
         Object[] p = Packs.generate(packs, rng);
@@ -110,15 +115,23 @@ public class GameView extends View {
     private void startLevel() {
         for (int r = 0; r < ROWS; r++)
             for (int c = 0; c < COLS; c++)
-                alive[r][c] = true;
+                hp[r][c] = randomHp();
         bricksLeft = ROWS * COLS;
         speed = (62 + 7 * (level - 1)) * unit;   // px/s
         padX = w / 2;
         resetBall();
     }
 
+    /** Mostly 1-hit bricks; numbered (2+) bricks get likelier and tougher with level. */
+    private int randomHp() {
+        int maxHp = Math.min(5, 1 + level);
+        float chance = Math.min(0.6f, 0.15f + 0.1f * level);
+        return rng.nextFloat() < chance ? 2 + rng.nextInt(maxHp - 1) : 1;
+    }
+
     private void resetBall() {
         state = State.READY;
+        trail.clear();
         ballX = padX; ballY = padY - ballR - 1;
         ballVX = 0; ballVY = 0;
     }
@@ -155,7 +168,7 @@ public class GameView extends View {
             long now = System.nanoTime();
             if (lastNs != 0) {
                 acc += Math.min((now - lastNs) / 1e9f, 0.05f);
-                while (acc >= STEP) { if (state == State.PLAYING) step(STEP); acc -= STEP; }
+                while (acc >= STEP) { if (state == State.PLAYING) step(STEP); pops.update(STEP); acc -= STEP; }
             }
             lastNs = now;
             invalidate();
@@ -164,6 +177,7 @@ public class GameView extends View {
     };
 
     private void step(float dt) {
+        trail.add(ballX, ballY);
         ballX += ballVX * dt;
         ballY += ballVY * dt;
 
@@ -184,20 +198,29 @@ public class GameView extends View {
         // bricks
         for (int r = 0; r < ROWS; r++) {
             for (int c = 0; c < COLS; c++) {
-                if (!alive[r][c]) continue;
+                if (hp[r][c] == 0) continue;
                 float bx = brickGap + c * (brickW + brickGap);
                 float by = brickTop + r * (brickH + brickGap);
                 float nx = Math.max(bx, Math.min(ballX, bx + brickW));
                 float ny = Math.max(by, Math.min(ballY, by + brickH));
                 float dx = ballX - nx, dy = ballY - ny;
                 if (dx * dx + dy * dy > ballR * ballR) continue;
-                alive[r][c] = false;
-                bricksLeft--;
-                score += 10 * (ROWS - r) * level;
-                // reflect along the axis of least overlap
-                float ox = Math.min(ballX + ballR - bx, bx + brickW - (ballX - ballR));
-                float oy = Math.min(ballY + ballR - by, by + brickH - (ballY - ballR));
-                if (ox < oy) ballVX = -ballVX; else ballVY = -ballVY;
+                if (--hp[r][c] == 0) {
+                    bricksLeft--; score += 10 * (ROWS - r) * level;
+                    pops.burst(bx + brickW / 2, by + brickH / 2, Theme.TILES[(r + c) % 3], 40 * unit, 9);
+                }
+                else score += 2 * level;
+                // reflect along the axis of least overlap and push the ball out, so
+                // a brick that survives the hit can't be hit again next step
+                float ol = ballX + ballR - bx, or = bx + brickW - (ballX - ballR);
+                float ot = ballY + ballR - by, ob = by + brickH - (ballY - ballR);
+                if (Math.min(ol, or) < Math.min(ot, ob)) {
+                    ballX += ol < or ? -ol : or;
+                    ballVX = -ballVX;
+                } else {
+                    ballY += ot < ob ? -ot : ob;
+                    ballVY = -ballVY;
+                }
                 if (bricksLeft == 0) { level++; save(); startLevelKeepScore(); return; }
                 return;   // one brick per step is plenty at 120 Hz
             }
@@ -210,6 +233,11 @@ public class GameView extends View {
 
     // ---- parents menu hooks ------------------------------------------
 
+    int[] growth() { return growth.clone(); }
+    void setGrowth(int[] g) {
+        growth = g.clone();
+        prefs.edit().putInt("gmin", g[0]).putInt("gafter", g[1]).putInt("grate", g[2]).putInt("gmax", g[3]).apply();
+    }
     int packs() { return packs; }
     void setPacks(int m) { packs = m; prefs.edit().putInt("packs2", m).apply(); }
     void resetBest() { best = 0; prefs.edit().putInt("best", 0).apply(); }
@@ -220,7 +248,13 @@ public class GameView extends View {
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         int a = e.getActionMasked();
+        if (threeTap.swallow(e, () -> { if (state == State.PLAYING) state = State.PAUSED; })) return true;   // double three-finger tap pauses
+        if (menuGesture) {                       // the tap that opened the menu must not also act on the game
+            if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) menuGesture = false;
+            return true;
+        }
         if (a == MotionEvent.ACTION_DOWN && menuBtn.contains(e.getX(), e.getY())) {
+            menuGesture = true;
             if (onMenu != null) onMenu.run();
             return true;
         }
@@ -250,66 +284,49 @@ public class GameView extends View {
 
     @Override
     protected void onDraw(Canvas cv) {
-        cv.drawColor(0xFF10121A);
-        paint.setStyle(Paint.Style.FILL);
+        cv.drawColor(Theme.NAVY);
 
         for (int r = 0; r < ROWS; r++) {
-            paint.setColor(ROW_COLORS[r % ROW_COLORS.length]);
             for (int c = 0; c < COLS; c++) {
-                if (!alive[r][c]) continue;
+                if (hp[r][c] == 0) continue;
                 float bx = brickGap + c * (brickW + brickGap);
                 float by = brickTop + r * (brickH + brickGap);
                 rect.set(bx, by, bx + brickW, by + brickH);
-                cv.drawRoundRect(rect, unit * 0.6f, unit * 0.6f, paint);
+                Theme.tile(cv, paint, rect, Theme.TILES[(r + c) % 3]);
+                if (hp[r][c] > 1)
+                    Theme.text(cv, paint, String.valueOf(hp[r][c]), rect.centerX(), rect.centerY(), brickH * 0.72f, Theme.NAVY);
             }
         }
 
-        paint.setColor(Color.WHITE);
         rect.set(padX - padW / 2, padY, padX + padW / 2, padY + padH);
-        cv.drawRoundRect(rect, padH / 2, padH / 2, paint);
+        Theme.tile(cv, paint, rect, Theme.MINT);
+        trail.draw(cv, paint, ballR, Theme.CREAM);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(Theme.CREAM);
         cv.drawCircle(ballX, ballY, ballR, paint);
+        pops.draw(cv, paint, unit * 1.1f);
 
-        paint.setTextSize(4 * unit);
-        paint.setTextAlign(Paint.Align.LEFT);
-        cv.drawText("Score " + score, 14 * unit, 8 * unit, paint);
-        for (int i = 0; i < 3; i++)
-            cv.drawRect(3 * unit, 3.4f * unit + i * 2 * unit, 9 * unit, 4.4f * unit + i * 2 * unit, paint);
-        paint.setTextAlign(Paint.Align.CENTER);
-        cv.drawText("Lv " + level + "  Drops " + drops, w / 2, 8 * unit, paint);
-        paint.setTextAlign(Paint.Align.RIGHT);
-        cv.drawText("Best " + Math.max(best, score), w - 3 * unit, 8 * unit, paint);
+        Theme.hud(cv, paint, w, unit, "Score " + score, "Lv " + level + "  Drops " + drops, "Best " + Math.max(best, score));
 
-        paint.setTextAlign(Paint.Align.CENTER);
         if (state == State.MATH) { drawMath(cv); return; }
         String msg = null;
-        if (state == State.READY)  msg = "Drag to move • release to launch";
-        if (state == State.PAUSED) msg = "Paused • tap to resume";
-        if (msg != null) {
-            paint.setTextSize(4.2f * unit);
-            cv.drawText(msg, w / 2, h * 0.62f, paint);
-        }
+        if (state == State.READY)  msg = "Drag to move \u2022 release to launch";
+        if (state == State.PAUSED) msg = "Paused \u2022 tap to resume";
+        if (msg != null) Theme.text(cv, paint, msg, w / 2, h * 0.62f, 4.2f * unit, Theme.WHITE);
     }
 
     private void drawMath(Canvas cv) {
-        paint.setColor(0xDD10121A);
-        cv.drawRect(0, 0, w, h, paint);
-        paint.setColor(Color.WHITE);
-        paint.setTextSize(4.2f * unit);
-        cv.drawText("Ball lost! Problem " + (solved + 1) + " of " + needed, w / 2, h * 0.18f, paint);
-        paint.setTextSize(8.5f * unit);
-        cv.drawText(question, w / 2, h * 0.30f, paint);
-        paint.setColor(0xFF90CAF9);
-        paint.setTextSize(9 * unit);
-        cv.drawText(input.isEmpty() ? "_" : input, w / 2, h * 0.40f, paint);
-        paint.setColor(0xFFFFB74D);
-        paint.setTextSize(3.6f * unit);
-        cv.drawText(feedback, w / 2, h * 0.45f, paint);
+        cv.drawColor(Theme.alpha(Theme.NAVY, 0.94f));
+        Theme.hud(cv, paint, w, unit, "Score " + score, "Lv " + level + "  Drops " + drops, "Best " + Math.max(best, score));
+        Theme.text(cv, paint, "Ball lost! Problem " + (solved + 1) + " of " + needed, w / 2, h * 0.17f, 4.2f * unit, Theme.CREAM);
+        Theme.textLines(cv, paint, question, w / 2, h * 0.28f, 8.5f * unit, w * 0.9f, h * 0.13f, Theme.WHITE);
+        Theme.text(cv, paint, input.isEmpty() ? "_" : input, w / 2, h * 0.38f, 9 * unit, Theme.MINT);
+        Theme.text(cv, paint, feedback, w / 2, h * 0.44f, 3.6f * unit, Theme.SUN);
         for (int i = 0; i < 12; i++) {
-            paint.setColor(i == 11 ? 0xFF43A047 : 0xFF2A2F42);
-            cv.drawRoundRect(keys[i], unit, unit, paint);
-            paint.setColor(Color.WHITE);
-            paint.setTextSize(6 * unit);
-            cv.drawText(KEY_LABELS[i], keys[i].centerX(), keys[i].centerY() + 2.2f * unit, paint);
+            int color = i == 11 ? Theme.MINT : i == 9 ? Theme.CORAL : Theme.SURFACE;
+            Theme.tile(cv, paint, keys[i], color);
+            Theme.text(cv, paint, KEY_LABELS[i], keys[i].centerX(), keys[i].centerY(), 6 * unit,
+                       i == 11 || i == 9 ? Theme.NAVY : Theme.CREAM);
         }
     }
 }

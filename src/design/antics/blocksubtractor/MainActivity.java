@@ -15,8 +15,12 @@ public class MainActivity extends Activity {
         game.onMenu = () -> {
             game.menuOpened();
             ParentsMenu.open(this, new ParentsMenu.Host() {
+                public String[] packNames() { return Packs.NAMES; }
+                public String[] packExamples() { return Packs.EXAMPLES; }
                 public int packs() { return game.packs(); }
                 public void setPacks(int m) { game.setPacks(m); }
+                public int[] growth() { return game.growth(); }
+                public void setGrowth(int[] g) { game.setGrowth(g); }
                 public void resetBest() { game.resetBest(); }
                 public void onMenuClosed() { hideSystemUI(); }
             });

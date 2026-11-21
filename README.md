@@ -1,6 +1,6 @@
 # Block Subtractor
 
-A fullscreen portrait block breaker. Drag to move the paddle, release to launch the ball, clear all bricks to advance a level (the ball gets faster). Losing a ball costs math: 1,1,1 then 2,3,4… problems must be solved before the next ball; best score is kept in SharedPreferences. No permissions, no network.
+A fullscreen portrait block breaker. Shared look: see `DESIGN.md`. Drag to move the paddle, release to launch the ball, clear all bricks to advance a level (numbered bricks take that many hits, counting down on each hit) (the ball gets faster). Losing a ball costs math: by default 1,1,1 then 2,3,4… problems must be solved before the next ball (the minimum, when growth starts, growth per ball and maximum are set in the parents menu); best score is kept in SharedPreferences. No permissions, no network.
 
 Built with Make — no Gradle, no IDE. Package `design.antics.blocksubtractor`,
 minSdk 24 / targetSdk 33.

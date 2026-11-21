@@ -11,6 +11,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 /**
@@ -22,10 +23,49 @@ final class ParentsMenu {
     private static final int PIN_LEN = 4;
 
     interface Host {
+        String[] packNames();
+        String[] packExamples();
         int packs();
         void setPacks(int mask);
         void resetBest();
         void onMenuClosed();
+        /** Descent speed in percent of the fall per second; negative hides the control. */
+        default int speed() { return -1; }
+        /** {min, afterBalls, growthPerBall, max} problems-per-lost-ball settings, or null to hide them. */
+        default int[] growth() { return null; }
+        default void setGrowth(int[] g) {}
+        default void setSpeed(int percent) {}
+    }
+
+    /**
+     * Problems needed for the drop-th lost ball (1-based): min for the first
+     * `after` balls, then +rate per further ball, never above max.
+     */
+    static int problems(int[] g, int drop) {
+        int n = g[0] + (drop > g[1] ? g[2] * (drop - g[1]) : 0);
+        return Math.max(g[0], Math.min(Math.max(g[0], g[3]), n));
+    }
+
+    private static LinearLayout stepper(Context c, String label, int lo, int hi, int[] g, int idx, Runnable changed) {
+        LinearLayout row = new LinearLayout(c);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name = new TextView(c);
+        name.setText(label);
+        name.setTextSize(15);
+        row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button minus = new Button(c), plus = new Button(c);
+        minus.setText("-"); plus.setText("+");
+        TextView val = new TextView(c);
+        val.setTextSize(20);
+        val.setGravity(Gravity.CENTER);
+        Runnable show = () -> val.setText(String.valueOf(g[idx]));
+        show.run();
+        minus.setOnClickListener(v -> { if (g[idx] > lo) { g[idx]--; show.run(); changed.run(); } });
+        plus.setOnClickListener(v -> { if (g[idx] < hi) { g[idx]++; show.run(); changed.run(); } });
+        row.addView(minus, new LinearLayout.LayoutParams(dp(c, 56), dp(c, 48)));
+        row.addView(val, new LinearLayout.LayoutParams(dp(c, 44), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.addView(plus, new LinearLayout.LayoutParams(dp(c, 56), dp(c, 48)));
+        return row;
     }
 
     /** Called with the entered digits; return an error message or null to accept. */
@@ -111,10 +151,10 @@ final class ParentsMenu {
         h.setText("Problem packs (at least one)");
         h.setTextSize(16);
         col.addView(h);
-        CheckBox[] boxes = new CheckBox[Packs.COUNT];
+        CheckBox[] boxes = new CheckBox[host.packNames().length];
         for (int i = 0; i < boxes.length; i++) {
             CheckBox cb = new CheckBox(c);
-            cb.setText(Packs.NAMES[i] + "  (" + Packs.EXAMPLES[i] + ")");
+            cb.setText(host.packNames()[i] + "  (" + host.packExamples()[i] + ")");
             cb.setChecked((host.packs() & (1 << i)) != 0);
             boxes[i] = cb;
             final int bit = 1 << i;
@@ -124,6 +164,50 @@ final class ParentsMenu {
                 host.setPacks(m);
             });
             col.addView(cb);
+        }
+
+        if (host.speed() >= 0) {
+            final int min = 2;
+            TextView sh = new TextView(c);
+            sh.setTextSize(16);
+            sh.setPadding(0, dp(c, 12), 0, 0);
+            SeekBar sb = new SeekBar(c);
+            sb.setMax(30 - min);
+            sb.setProgress(Math.max(min, Math.min(30, host.speed())) - min);
+            Runnable label = () -> sh.setText("Descent speed: " + (sb.getProgress() + min) + "% of the fall per second");
+            label.run();
+            sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                public void onProgressChanged(SeekBar s, int v, boolean user) { host.setSpeed(v + min); label.run(); }
+                public void onStartTrackingTouch(SeekBar s) {}
+                public void onStopTrackingTouch(SeekBar s) {}
+            });
+            col.addView(sh);
+            col.addView(sb);
+        }
+
+        if (host.growth() != null) {
+            int[] g = host.growth().clone();
+            TextView gh = new TextView(c);
+            gh.setText("Problems per lost ball");
+            gh.setTextSize(16);
+            gh.setPadding(0, dp(c, 12), 0, 0);
+            col.addView(gh);
+            TextView preview = new TextView(c);
+            preview.setTextSize(13);
+            Runnable changed = () -> {
+                g[3] = Math.max(g[3], g[0]);                       // max never below min
+                StringBuilder sb = new StringBuilder("Balls 1, 2, 3...: ");
+                for (int i = 1; i <= 10; i++) sb.append(problems(g, i)).append(i < 10 ? ", " : " ...");
+                preview.setText(sb);
+                host.setGrowth(g.clone());
+            };
+            col.addView(stepper(c, "Minimum per ball", 1, 10, g, 0, changed));
+            col.addView(stepper(c, "Start growing after ball", 0, 20, g, 1, changed));
+            col.addView(stepper(c, "Extra problems per ball after that", 0, 5, g, 2, changed));
+            col.addView(stepper(c, "Maximum per ball", 1, 30, g, 3, changed));
+            col.addView(preview);
+            preview.setText("");
+            changed.run();
         }
 
         Button reset = new Button(c);
